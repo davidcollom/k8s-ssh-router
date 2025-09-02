@@ -5,8 +5,6 @@ on:
     branches: [ main, release/**, feature/** ]  # Adjust as per your branching strategy
   pull_request:
     branches: [ main, release/**, feature/** ]  # Adjust as per your branching strategy
-  tags:
-    - 'v*'
 
 jobs:
   build:
