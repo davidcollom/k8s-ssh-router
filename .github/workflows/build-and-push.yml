@@ -13,6 +13,13 @@ jobs:
 
     runs-on: ubuntu-latest
 
+    permissions:
+      contents: read
+      # The image is published to ghcr.io, which needs the package write
+      # scope. Without it the push is denied with "installation not allowed
+      # to Create organization package".
+      packages: write
+
     steps:
     - name: Checkout code
       uses: actions/checkout@v6
@@ -55,6 +62,8 @@ jobs:
       with:
         images: ghcr.io/${{ github.repository }}
 
+    # docker/metadata-action uses the "latest=auto" flavor, so a push to the
+    # default branch (golang) publishes the "latest" tag as well.
     - name: Build and push Docker image
       uses: docker/build-push-action@v6
       with:
@@ -64,13 +73,3 @@ jobs:
         push: true
         tags: ${{ steps.meta.outputs.tags }}
         labels: ${{ steps.meta.outputs.labels }}
-
-    - name: Push latest tag
-      if: github.ref == 'refs/heads/golang'
-      uses: docker/build-push-action@v6
-      with:
-        context: .
-        file: Dockerfile
-        platforms: linux/amd64,linux/arm64
-        push: true
-        tags: ghcr.io/${{ github.repository }}:${{ steps.meta.outputs.tags }} ghcr.io/${{ github.repository }}:latest
