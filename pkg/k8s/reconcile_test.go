@@ -30,7 +30,7 @@ func TestReconcileCache(t *testing.T) {
 	clientset.CoreV1().Secrets("default").Create(context.TODO(), secret, metav1.CreateOptions{})
 
 	// Start reconciliation
-	reconcileCache(clientset, "default")
+	reconcileCache(context.Background(), clientset, "default")
 
 	// Verify secret in cache
 	usernameWithNamespace := "default-testuser"
@@ -50,7 +50,7 @@ func TestReconcileCache(t *testing.T) {
 	secret.Data["password"] = []byte("newpassword")
 	clientset.CoreV1().Secrets("default").Update(context.TODO(), secret, metav1.UpdateOptions{})
 
-	reconcileCache(clientset, "default")
+	reconcileCache(context.Background(), clientset, "default")
 	cachedSecret, found = GetSecretFromCache(usernameWithNamespace)
 	assert.True(t, found, "Secret should be found in cache after modification")
 	expectedData["password"] = "newpassword"
@@ -59,7 +59,7 @@ func TestReconcileCache(t *testing.T) {
 	// Delete secret and start reconciliation again
 	clientset.CoreV1().Secrets("default").Delete(context.TODO(), secret.Name, metav1.DeleteOptions{})
 
-	reconcileCache(clientset, "default")
+	reconcileCache(context.Background(), clientset, "default")
 	_, found = GetSecretFromCache(usernameWithNamespace)
 	assert.False(t, found, "Secret should not be found in cache after deletion")
 }

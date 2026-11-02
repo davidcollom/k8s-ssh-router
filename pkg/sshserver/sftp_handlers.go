@@ -12,6 +12,15 @@ import (
 	"k8s.io/client-go/tools/remotecommand"
 )
 
+// Compile-time checks that SFTPHandler satisfies the handler interfaces that
+// pkg/sftp v1.11+ expects in a sftp.Handlers value.
+var (
+	_ sftp.FileReader = (*SFTPHandler)(nil)
+	_ sftp.FileWriter = (*SFTPHandler)(nil)
+	_ sftp.FileCmder  = (*SFTPHandler)(nil)
+	_ sftp.FileLister = (*SFTPHandler)(nil)
+)
+
 type SFTPHandler struct {
 	Clientset     kubernetes.Interface
 	Config        *rest.Config
@@ -20,8 +29,9 @@ type SFTPHandler struct {
 	ContainerName string
 }
 
-func (h *SFTPHandler) FileGet(r *sftp.Request) (io.ReaderAt, error) {
-	cmd := fmt.Sprintf("cat %s", r.Filepath)
+// Fileread serves an SFTP "get" request by cat-ing the file out of the pod.
+func (h *SFTPHandler) Fileread(r *sftp.Request) (io.ReaderAt, error) {
+	cmd := fmt.Sprintf("cat %s", shellQuote(r.Filepath))
 	stdout, stderr, err := h.execInPod(cmd)
 	if err != nil {
 		return nil, fmt.Errorf("error reading file: %v, stderr: %s", err, stderr)
@@ -29,49 +39,55 @@ func (h *SFTPHandler) FileGet(r *sftp.Request) (io.ReaderAt, error) {
 	return bytes.NewReader(stdout), nil
 }
 
-func (h *SFTPHandler) FilePut(r *sftp.Request) (io.WriterAt, error) {
-	cmd := fmt.Sprintf("cat > %s", r.Filepath)
+// Filewrite serves an SFTP "put" request. The returned writer buffers the
+// upload and flushes it into the pod when it is closed.
+func (h *SFTPHandler) Filewrite(r *sftp.Request) (io.WriterAt, error) {
+	cmd := fmt.Sprintf("cat > %s", shellQuote(r.Filepath))
 	stdin := new(bytes.Buffer)
 	writer := &sftpFileWriter{stdin: stdin, handler: h, cmd: cmd}
 	return writer, nil
 }
 
-func (h *SFTPHandler) FileRemove(r *sftp.Request) error {
-	cmd := fmt.Sprintf("rm %s", r.Filepath)
+// Filecmd serves the mutating SFTP requests (remove, rename, chmod). pkg/sftp
+// v1.11+ routes every one of them through a single Filecmd callback and tells
+// us which one it is through Request.Method.
+func (h *SFTPHandler) Filecmd(r *sftp.Request) error {
+	var cmd string
+	switch r.Method {
+	case "Remove":
+		cmd = fmt.Sprintf("rm %s", shellQuote(r.Filepath))
+	case "Rename", "PosixRename":
+		cmd = fmt.Sprintf("mv %s %s", shellQuote(r.Filepath), shellQuote(r.Target))
+	case "Chmod":
+		attrs := r.Attributes()
+		if attrs == nil {
+			return fmt.Errorf("chmod request for %s carried no attributes", r.Filepath)
+		}
+		cmd = fmt.Sprintf("chmod %o %s", os.FileMode(attrs.Mode).Perm(), shellQuote(r.Filepath))
+	default:
+		return fmt.Errorf("unsupported sftp command %q", r.Method)
+	}
+
 	_, stderr, err := h.execInPod(cmd)
 	if err != nil {
-		return fmt.Errorf("error removing file: %v, stderr: %s", err, stderr)
+		return fmt.Errorf("error running %q: %v, stderr: %s", r.Method, err, stderr)
 	}
 	return nil
 }
 
-func (h *SFTPHandler) FileList(r *sftp.Request) ([]os.FileInfo, error) {
-	cmd := fmt.Sprintf("ls -l %s", r.Filepath)
+// Filelist serves an SFTP "list" request by listing the directory inside the
+// pod.
+func (h *SFTPHandler) Filelist(r *sftp.Request) (sftp.ListerAt, error) {
+	cmd := fmt.Sprintf("ls -l %s", shellQuote(r.Filepath))
 	stdout, stderr, err := h.execInPod(cmd)
 	if err != nil {
 		return nil, fmt.Errorf("error listing directory: %v, stderr: %s", err, stderr)
 	}
-	// Parse stdout to create os.FileInfo slice
-	// ...
-	return nil, nil
-}
-
-func (h *SFTPHandler) FileRename(r *sftp.Request) error {
-	cmd := fmt.Sprintf("mv %s %s", r.Filepath, r.Target)
-	_, stderr, err := h.execInPod(cmd)
+	entries, err := parseLsLong(stdout)
 	if err != nil {
-		return fmt.Errorf("error renaming file: %v, stderr: %s", err, stderr)
+		return nil, fmt.Errorf("error parsing directory listing: %v", err)
 	}
-	return nil
-}
-
-func (h *SFTPHandler) FileChmod(r *sftp.Request) error {
-	cmd := fmt.Sprintf("chmod %o %s", r.Attributes().Permissions, r.Filepath)
-	_, stderr, err := h.execInPod(cmd)
-	if err != nil {
-		return fmt.Errorf("error changing file permissions: %v, stderr: %s", err, stderr)
-	}
-	return nil
+	return &listerAt{entries: entries}, nil
 }
 
 func (h *SFTPHandler) execInPod(cmd string) ([]byte, []byte, error) {

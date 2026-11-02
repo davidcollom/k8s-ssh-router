@@ -1,6 +1,7 @@
 package sshserver
 
 import (
+	"context"
 	"fmt"
 	"log"
 	"net"
@@ -14,26 +15,34 @@ import (
 	"k8s.io/client-go/rest"
 )
 
-func RunServer(reconcileInterval, sshPort, metricsPort int, namespace, privateKeyPath string) {
-	go func() {
-		readyCh := make(chan struct{})
-		if _, err := k8s.WatchSecretsClusterWide(reconcileInterval, namespace, readyCh); err != nil {
-			log.Fatalf("Failed to start watcher: %v", err)
-		}
-	}()
-	go metrics.StartMetricsServer(metricsPort)
-	config, err := rest.InClusterConfig()
-	if err != nil {
-		log.Fatalf("Failed to create in-cluster config: %v", err)
-	}
-	clientset, err := kubernetes.NewForConfig(config)
-	if err != nil {
-		log.Fatalf("Failed to create Kubernetes client: %v", err)
-	}
-	startSSHServer(sshPort, privateKeyPath, clientset, config)
+// RunServer starts the secret watcher, the metrics endpoint and the SSH
+// server. It blocks until the SSH server stops, which happens when the given
+// context is cancelled.
+func RunServer(ctx context.Context, reconcileInterval, sshPort, metricsPort int, namespace, privateKeyPath string, clientset kubernetes.Interface, config *rest.Config) {
+	go watchSecrets(ctx, reconcileInterval, namespace)
+	go serveMetrics(ctx, metricsPort)
+	serveSSH(ctx, sshPort, privateKeyPath, clientset, config)
 }
 
-func startSSHServer(port int, privateKeyPath string, clientset kubernetes.Interface, restConfig *rest.Config) {
+// watchSecrets keeps the credential cache in sync with the secrets that are
+// labelled for SSH access.
+func watchSecrets(ctx context.Context, reconcileInterval int, namespace string) {
+	readyCh := make(chan struct{})
+	if _, err := k8s.WatchSecretsClusterWide(ctx, reconcileInterval, namespace, readyCh); err != nil {
+		log.Fatalf("Failed to start watcher: %v", err)
+	}
+}
+
+// serveMetrics runs the Prometheus metrics endpoint until the context is
+// cancelled.
+func serveMetrics(ctx context.Context, port int) {
+	if err := metrics.StartMetricsServer(ctx, port); err != nil {
+		log.Printf("Metrics server stopped: %v", err)
+	}
+}
+
+// serveSSH accepts SSH connections until the context is cancelled.
+func serveSSH(ctx context.Context, port int, privateKeyPath string, clientset kubernetes.Interface, restConfig *rest.Config) {
 	sshConfig := &ssh.ServerConfig{
 		NoClientAuth:      false,
 		PasswordCallback:  auth.PasswordCallback,
@@ -58,12 +67,27 @@ func startSSHServer(port int, privateKeyPath string, clientset kubernetes.Interf
 	}
 	log.Printf("Listening on 0.0.0.0:%d...", port)
 
+	// Closing the listener makes Accept return so that the server can stop.
+	go closeListenerOnCancel(ctx, listener)
+
 	for {
 		conn, err := listener.Accept()
 		if err != nil {
+			if ctx.Err() != nil {
+				log.Printf("Shutting down SSH server")
+				return
+			}
 			log.Printf("Failed to accept incoming connection: %v", err)
 			continue
 		}
 		go HandleSSHConnection(conn, sshConfig, clientset, restConfig)
+	}
+}
+
+// closeListenerOnCancel closes the listener once the context is cancelled.
+func closeListenerOnCancel(ctx context.Context, listener net.Listener) {
+	<-ctx.Done()
+	if err := listener.Close(); err != nil {
+		log.Printf("Failed to close listener: %v", err)
 	}
 }
