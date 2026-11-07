@@ -45,6 +45,7 @@ func startSFTPServer(t *testing.T, privateKeyPath string, fs afero.Fs, clientset
 				channel, requests, err := newChannel.Accept()
 				require.NoError(t, err, "Failed to accept channel")
 
+				go ssh.DiscardRequests(requests)
 				go handleSFTP(channel, clientset, config, "default", "test-pod", "test-container")
 			}
 		}

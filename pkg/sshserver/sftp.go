@@ -12,13 +12,6 @@ import (
 
 // handleSFTP handles SFTP requests.
 func handleSFTP(channel ssh.Channel, clientset kubernetes.Interface, config *rest.Config, namespace, podName, containerName string) {
-	server, err := sftp.NewServer(channel)
-	if err != nil {
-		log.Printf("Failed to create SFTP server: %v", err)
-		channel.Close()
-		return
-	}
-
 	handler := &SFTPHandler{
 		Clientset:     clientset,
 		Config:        config,
@@ -27,12 +20,15 @@ func handleSFTP(channel ssh.Channel, clientset kubernetes.Interface, config *res
 		ContainerName: containerName,
 	}
 
-	server.SetFileGet(handler)
-	server.SetFilePut(handler)
-	server.SetFileRemove(handler)
-	server.SetFileList(handler)
-	server.SetFileRename(handler)
-	server.SetFileChmod(handler)
+	// pkg/sftp v1.11 dropped the per-operation setters that used to hang off
+	// *sftp.Server (SetFileGet, SetFilePut, ...) and replaced them with a
+	// Handlers value that is handed to NewRequestServer.
+	server := sftp.NewRequestServer(channel, sftp.Handlers{
+		FileGet:  handler,
+		FilePut:  handler,
+		FileCmd:  handler,
+		FileList: handler,
+	})
 
 	if err := server.Serve(); err == io.EOF {
 		server.Close()

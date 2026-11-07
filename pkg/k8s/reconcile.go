@@ -10,18 +10,26 @@ import (
 	"k8s.io/client-go/kubernetes"
 )
 
-func startReconciliation(clientset kubernetes.Interface, reconcileInterval int, namespace string) {
+// startReconciliation refreshes the credential cache on a fixed interval
+// until the context is cancelled.
+func startReconciliation(ctx context.Context, clientset kubernetes.Interface, reconcileInterval int, namespace string) {
 	ticker := time.NewTicker(time.Duration(reconcileInterval) * time.Second)
 	defer ticker.Stop()
 
-	for range ticker.C {
-		reconcileCache(clientset, namespace)
+	for {
+		select {
+		case <-ctx.Done():
+			log.Println("Stopping reconciliation...")
+			return
+		case <-ticker.C:
+			reconcileCache(ctx, clientset, namespace)
+		}
 	}
 }
 
-func reconcileCache(clientset kubernetes.Interface, namespace string) {
+func reconcileCache(ctx context.Context, clientset kubernetes.Interface, namespace string) {
 	log.Println("Starting reconciliation...")
-	secrets, err := clientset.CoreV1().Secrets(namespace).List(context.TODO(), metav1.ListOptions{
+	secrets, err := clientset.CoreV1().Secrets(namespace).List(ctx, metav1.ListOptions{
 		LabelSelector: "ssh=user",
 	})
 	if err != nil {

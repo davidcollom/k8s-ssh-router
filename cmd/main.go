@@ -1,7 +1,11 @@
 package main
 
 import (
+	"context"
 	"log"
+	"os"
+	"os/signal"
+	"syscall"
 
 	"github.com/davidcollom/k8s-ssh-router/pkg/sshserver"
 	"github.com/spf13/cobra"
@@ -39,6 +43,11 @@ func main() {
 }
 
 func RunServer() {
+	// Cancelling the context on SIGINT or SIGTERM lets the server shut the
+	// listeners down gracefully instead of being killed mid request.
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
 	k8sConfig, err := rest.InClusterConfig()
 	if err != nil {
 		k8sConfig, err = clientcmd.BuildConfigFromFlags("", clientcmd.RecommendedHomeFile)
@@ -52,5 +61,5 @@ func RunServer() {
 		log.Fatalf("Failed to create Kubernetes client: %v", err)
 	}
 
-	sshserver.RunServer(reconcileInterval, sshPort, metricsPort, namespace, privateKeyPath, clientset, k8sConfig)
+	sshserver.RunServer(ctx, reconcileInterval, sshPort, metricsPort, namespace, privateKeyPath, clientset, k8sConfig)
 }
